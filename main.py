@@ -249,6 +249,7 @@ def load_cover_image(filename, size):
 TITLE_BACKGROUND = load_cover_image("title_background.png", (WIDTH, HEIGHT))
 START_BUTTON_SPRITE = load_sprite("start_button.png", 78)
 BANANA_SPRITE = load_sprite("banana.png", 42)
+MOM_FALL_SPRITE = load_sprite("mom_fall.png", 86)
 DEVICE_SPRITES = {
     "lamp": load_sprite("lamp.png", 58),
     "fridge": load_sprite("fridge.png", 82),
@@ -263,10 +264,14 @@ DEVICE_STATE_SPRITES = {
 TOILET_SPRITE = load_sprite("toilet.png", 74)
 BATHTUB_SPRITE = load_sprite("bathtub.png", 58)
 BED_SPRITE = load_sprite("bed.png", 104)
+WARDROBE_SPRITE = load_sprite("wardrobe.png", 104)
 SOFA_SPRITES = load_separated_sprites("sofa.png", 96)
 SOFA_FRONT_SPRITE = SOFA_SPRITES[0] if len(SOFA_SPRITES) > 0 else None
 SOFA_SIDE_SPRITE = SOFA_SPRITES[1] if len(SOFA_SPRITES) > 1 else None
 COFFEE_TABLE_SPRITE = load_sprite("coffee_table.png", 52)
+KITCHEN_SINK_SPRITE = load_sprite("kitchen_sink.png", 74)
+DESK_SPRITE = load_sprite("desk.png", 92)
+PANTRY_SHELF_SPRITE = load_sprite("pantry_shelf.png", 106)
 
 
 ROOM_ORDER = [
@@ -314,6 +319,10 @@ class Door:
         self.vertical = vertical
         self.closed = False
         self.close_flash = 0.0
+        self.auto_close_ready = False
+        self.manual_open = False
+        self.close_cooldown = 0.0
+        self.opened_by = None
 
     @property
     def center(self):
@@ -325,18 +334,42 @@ class Door:
             return pygame.Rect(self.opening.centerx - 8, self.opening.centery - 34, 16, 68)
         return pygame.Rect(self.opening.centerx - 34, self.opening.centery - 8, 68, 16)
 
-    def open(self):
+    @property
+    def open_panel_rect(self):
+        if self.vertical:
+            hinge = (self.opening.centerx, self.opening.top + 4)
+            return pygame.Rect(hinge[0] + 2, hinge[1] - 7, self.opening.h, 14)
+        hinge = (self.opening.left + 4, self.opening.centery)
+        return pygame.Rect(hinge[0] - 7, hinge[1] + 2, 14, self.opening.w)
+
+    @property
+    def solid_rect(self):
+        return self.block_rect if self.closed else self.open_panel_rect
+
+    def open(self, manual=False):
         if not self.closed:
+            if manual:
+                self.manual_open = True
             return False
         self.closed = False
+        self.auto_close_ready = False
+        self.manual_open = manual
+        self.close_cooldown = 1.4
+        self.opened_by = "mom" if manual else "son"
         return True
 
-    def close(self, blockers=()):
+    def close(self, blockers=(), force=False):
         if self.closed:
+            return False
+        if self.close_cooldown > 0 and not force:
             return False
         if any(self.block_rect.colliderect(blocker.collision_rect()) for blocker in blockers):
             return False
         self.closed = True
+        self.auto_close_ready = False
+        self.manual_open = False
+        self.close_cooldown = 0.0
+        self.opened_by = None
         self.close_flash = 0.8
         return True
 
@@ -352,6 +385,18 @@ class Door:
                 knob = (panel.centerx, panel.centery + 5)
                 pygame.draw.line(surface, (181, 119, 63), (panel.left + 7, panel.centery), (panel.right - 7, panel.centery), 1)
             pygame.draw.circle(surface, (241, 204, 103), knob, 4)
+        else:
+            if self.vertical:
+                hinge = (self.opening.centerx, self.opening.top + 4)
+                panel = self.open_panel_rect
+                knob = (panel.right - 12, panel.centery)
+            else:
+                hinge = (self.opening.left + 4, self.opening.centery)
+                panel = self.open_panel_rect
+                knob = (panel.centerx, panel.bottom - 12)
+            draw_3d_rect(surface, panel, (190, 133, 75), COLORS["wood_dark"], height=3, radius=4)
+            pygame.draw.line(surface, (132, 82, 42), hinge, knob, 2)
+            pygame.draw.circle(surface, (241, 204, 103), knob, 3)
         if self.close_flash > 0:
             self.close_flash = max(0, self.close_flash - 0.05)
             pygame.draw.rect(surface, COLORS["warn"], self.block_rect.inflate(8, 8), 2, border_radius=5)
@@ -689,6 +734,7 @@ class Device:
         self.x = float(x)
         self.y = float(y)
         self.wall_side = wall_side
+        self.glow_rect = glow_rect
         data = self.TYPES[dtype]
         self.label = data["label"]
         self.watts = data["watts"]
@@ -702,7 +748,7 @@ class Device:
                 self.sprite = pygame.transform.rotate(self.sprite, -90)
             elif wall_side == "bottom":
                 self.sprite = pygame.transform.rotate(self.sprite, 180)
-        if self.sprite and self.dtype == "fan" and glow_rect and self.x < glow_rect.centerx:
+        if self.sprite and self.dtype == "fan" and self.fan_wind_vector().x < 0:
             self.sprite = pygame.transform.flip(self.sprite, True, False)
         if self.sprite:
             self.w, self.h = self.sprite.get_size()
@@ -713,7 +759,6 @@ class Device:
         self.on = False
         self.flash = 0.0
         self.pulse = random.uniform(0, math.tau)
-        self.glow_rect = glow_rect
 
     @property
     def rect(self):
@@ -785,13 +830,14 @@ class Device:
             if self.sprite:
                 surface.blit(self.sprite, rect)
                 if self.on:
-                    room_centerx = self.glow_rect.centerx if self.glow_rect else self.x
-                    for i, dy in enumerate((-14, 0, 14)):
+                    wind = self.fan_wind_vector()
+                    tangent = pygame.Vector2(-wind.y, wind.x)
+                    start = pygame.Vector2(rect.center) + wind * 24
+                    for i, lane in enumerate((-14, 0, 14)):
                         offset = (t * 34 + i * 9) % 18
-                        start_x = rect.left - 10 if self.x < room_centerx else rect.right + 10
-                        direction = -1 if self.x < room_centerx else 1
+                        lane_start = start + tangent * lane
                         points = [
-                            (round(start_x + direction * (offset + step * 10)), round(rect.centery + dy + math.sin(t * 8 + step) * 3))
+                            tuple(round(v) for v in lane_start + wind * (offset + step * 10) + tangent * (math.sin(t * 8 + step) * 3))
                             for step in range(4)
                         ]
                         pygame.draw.lines(surface, COLORS["blue"], False, points, 2)
@@ -816,6 +862,15 @@ class Device:
         if self.flash > 0:
             self.flash = max(0, self.flash - 0.05)
             pygame.draw.rect(surface, COLORS["warn"], rect.inflate(10, 10), 2, border_radius=6)
+
+    def fan_wind_vector(self):
+        if not self.glow_rect:
+            return pygame.Vector2(1, 0)
+        dx = self.x - self.glow_rect.centerx
+        dy = self.y - self.glow_rect.centery
+        if abs(dx) >= abs(dy):
+            return pygame.Vector2(-1 if dx > 0 else 1, 0)
+        return pygame.Vector2(0, -1 if dy > 0 else 1)
 
     def draw_ac_wind(self, surface, rect, t):
         color = (116, 202, 238)
@@ -861,6 +916,7 @@ class Character:
         self.moving = False
         self.facing = pygame.Vector2(0, 1)
         self.look_left = False
+        self.ignore_son_opened_doors = False
 
     @property
     def pos(self):
@@ -877,10 +933,13 @@ class Character:
             return False
         if rect.collidelist(GLOBAL_FURNITURE_COLLISIONS) != -1:
             return False
+        def door_blocks(door):
+            return not (self.ignore_son_opened_doors and not door.closed and door.opened_by in {None, "son"})
         if ignore_doors:
-            return True
-        closed_doors = [door.block_rect for door in ACTIVE_DOORS if door.closed]
-        return rect.collidelist(closed_doors) == -1
+            open_panels = [door.open_panel_rect for door in ACTIVE_DOORS if not door.closed and door_blocks(door)]
+            return rect.collidelist(open_panels) == -1
+        solid_doors = [door.solid_rect for door in ACTIVE_DOORS if door_blocks(door)]
+        return rect.collidelist(solid_doors) == -1
 
     def move(self, dx, dy):
         if dx == 0 and dy == 0:
@@ -959,9 +1018,17 @@ class Mom(Character):
         return saved, handled
 
     def draw(self, surface, name="엄마"):
-        super().draw(surface, name)
-        if self.stun_timer > 0:
-            draw_text(surface, "미끄러짐!", FONT_XS, COLORS["danger"], (self.x, self.y - 58), center=True)
+        if self.stun_timer > 0 and MOM_FALL_SPRITE:
+            cx, cy = round(self.x), round(self.y)
+            rect = MOM_FALL_SPRITE.get_rect(center=(cx, cy - 10))
+            draw_shadow(surface, pygame.Rect(rect.x + 12, rect.bottom - 20, max(34, rect.w - 24), 14), 50)
+            surface.blit(MOM_FALL_SPRITE, rect)
+            draw_text(surface, name, FONT_XS, COLORS["black"], (cx, cy + 31), center=True)
+            draw_text(surface, "미끌미끌!", FONT_XS, COLORS["danger"], (cx, rect.top - 10), center=True)
+        else:
+            super().draw(surface, name)
+            if self.stun_timer > 0:
+                draw_text(surface, "미끌미끌!", FONT_XS, COLORS["danger"], (self.x, self.y - 58), center=True)
         if self.message_timer > 0:
             msg = FONT_SM.render(self.message, True, COLORS["text"])
             box = pygame.Rect(0, 0, msg.get_width() + 16, 26)
@@ -980,10 +1047,14 @@ class Son(Character):
         self.wait = random.uniform(0.5, 1.1)
         self.status = "놀러 다니는 중"
         self.door_timer = 0.0
+        self.repath_timer = 0.0
+        self.stuck_timer = 0.0
         self.banana_timer = random.uniform(8, 14)
+        self.ignore_son_opened_doors = True
 
     def update(self, devices, doors, bananas, blockers, dt):
         self.door_timer = max(0, self.door_timer - dt)
+        self.repath_timer = max(0, self.repath_timer - dt)
         self.banana_timer -= dt
         if self.banana_timer <= 0 and len(bananas) < 6:
             bananas.append(Banana(self.x, self.y))
@@ -993,6 +1064,7 @@ class Son(Character):
             self.target = None
             self.path = []
         if not self.target:
+            self.stuck_timer = 0.0
             self.wait -= dt
             self.move(0, 0)
             if self.wait <= 0:
@@ -1003,14 +1075,15 @@ class Son(Character):
                 self.wait = random.uniform(0.4, 1.1)
             elif random.random() < 0.02:
                 self.move(random.uniform(-1, 1), random.uniform(-1, 1))
-                self.close_nearby_door(doors, blockers)
             return
 
+        old_x, old_y = self.x, self.y
         if self.pos.distance_to(self.target.pos) <= 30:
             self.target.turn_on()
             self.status = f"{self.target.label} 켰다!"
             self.target = None
             self.path = []
+            self.stuck_timer = 0.0
             self.wait = random.uniform(0.35, 0.9)
             return
 
@@ -1022,9 +1095,24 @@ class Son(Character):
         if not self.move(direction.x, direction.y):
             self.open_nearest_closed_door(doors)
             self.snap_to_nearby_waypoint()
-            if not self.path:
+            if self.repath_timer <= 0:
                 self.path = self.find_path(self.target.pos)
-        self.close_nearby_door(doors, blockers)
+                self.repath_timer = 0.35
+
+        moved_amount = abs(self.x - old_x) + abs(self.y - old_y)
+        if moved_amount < 0.05 and self.target:
+            self.stuck_timer += dt
+            if self.stuck_timer >= 0.9:
+                self.open_nearest_closed_door(doors)
+                self.path = self.find_path(self.target.pos)
+                self.repath_timer = 0.35
+                if not self.path and self.pos.distance_to(self.target.pos) > 42:
+                    self.target = None
+                    self.status = "다른 낭비 찾는 중"
+                    self.wait = 0.2
+                self.stuck_timer = 0.0
+        else:
+            self.stuck_timer = 0.0
 
     def choose_target(self, devices):
         choices = [d for d in devices if not d.on]
@@ -1448,7 +1536,7 @@ class Game:
         self.camera.x = max(0, min(WORLD_WIDTH - WIDTH, self.mom.x - VIEW_CENTER.x))
         self.camera.y = max(0, min(WORLD_HEIGHT - HEIGHT, self.mom.y - VIEW_CENTER.y))
 
-    def pick_banana_or_open_door(self):
+    def pick_banana_or_toggle_door(self):
         near_bananas = [b for b in self.bananas if self.mom.pos.distance_to(b.pos) <= self.mom.range]
         if near_bananas:
             banana = min(near_bananas, key=lambda b: self.mom.pos.distance_to(b.pos))
@@ -1456,13 +1544,48 @@ class Game:
             self.mom.message = "바나나 주움!"
             self.mom.message_timer = 55
             return
-        closed_doors = [d for d in self.doors if d.closed and self.mom.pos.distance_to(d.center) <= self.mom.range + 35]
-        if closed_doors and min(closed_doors, key=lambda d: self.mom.pos.distance_to(d.center)).open():
-            self.mom.message = "문 열림!"
-            self.mom.message_timer = 55
-            return
+        nearby_doors = [d for d in self.doors if self.mom.pos.distance_to(d.center) <= self.mom.range + 35]
+        if nearby_doors:
+            door = min(nearby_doors, key=lambda d: self.mom.pos.distance_to(d.center))
+            if door.closed:
+                if door.open(manual=True):
+                    self.mom.message = "문 열림!"
+                    self.mom.message_timer = 55
+                    return
+            elif door.close((self.mom, self.son), force=True):
+                self.mom.message = "문 닫힘!"
+                self.mom.message_timer = 55
+                return
+            else:
+                self.mom.message = "문 앞을 비워야 해요"
+                self.mom.message_timer = 55
+                return
         self.mom.message = "주울 바나나/문이 없어요"
         self.mom.message_timer = 45
+
+    def auto_close_passed_doors(self, dt):
+        blockers = (self.mom, self.son)
+        for door in self.doors:
+            door.close_cooldown = max(0, door.close_cooldown - dt)
+            if door.closed:
+                door.auto_close_ready = False
+                continue
+            if door.manual_open:
+                door.auto_close_ready = False
+                continue
+            son_rect = self.son.collision_rect()
+            mom_rect = self.mom.collision_rect()
+            son_near = door.block_rect.inflate(96, 96).colliderect(son_rect) or door.open_panel_rect.inflate(58, 58).colliderect(son_rect)
+            anyone_near = (
+                door.block_rect.inflate(84, 84).colliderect(son_rect)
+                or door.block_rect.inflate(84, 84).colliderect(mom_rect)
+                or door.open_panel_rect.inflate(44, 44).colliderect(son_rect)
+                or door.open_panel_rect.inflate(44, 44).colliderect(mom_rect)
+            )
+            if son_near:
+                door.auto_close_ready = True
+            elif door.auto_close_ready and not anyone_near:
+                door.close(blockers)
 
     def turn_off_nearby_device(self):
         saved, handled = self.mom.interact_devices(self.devices)
@@ -1488,14 +1611,15 @@ class Game:
         keys = pygame.key.get_pressed()
         self.mom.update(keys, dt)
         self.son.update(self.devices, self.doors, self.bananas, (self.mom, self.son), dt)
+        self.auto_close_passed_doors(dt)
         self.update_camera()
 
         for banana in list(self.bananas):
             if self.mom.stun_timer <= 0 and self.mom.pos.distance_to(banana.pos) < 24:
                 self.bananas.remove(banana)
-                self.mom.stun_timer = 2.0
+                self.mom.stun_timer = 3.0
                 self.mom.message = "바나나를 밟았어요!"
-                self.mom.message_timer = 70
+                self.mom.message_timer = 95
 
         self.risk += (self.watts_on() / 1800 + sum(1 for d in self.devices if d.on and d.dtype == "sink") * 0.4) * dt
         self.risk = max(0, min(100, self.risk))
@@ -1622,13 +1746,48 @@ class Game:
                 bed_rect.x = max(inner.left, min(inner.right - bed_rect.w, bed_rect.x))
                 bed_rect.y = max(inner.top, min(inner.bottom - bed_rect.h, bed_rect.y))
                 sprite_items.append((bed_rect, BED_SPRITE, "침대"))
-                items = [item(0.78, 0.50, 0.18, 0.58, "옷장", 34, 70)]
             else:
-                items = [item(0.36, 0.50, 0.48, 0.42, "침대", 82, 58), item(0.78, 0.50, 0.18, 0.58, "옷장", 34, 70)]
+                items.append(item(0.36, 0.50, 0.48, 0.42, "침대", 82, 58))
+            if WARDROBE_SPRITE:
+                wardrobe_rect = WARDROBE_SPRITE.get_rect()
+                wardrobe_rect.center = (round(r.left + r.w * 0.78), round(r.top + r.h * 0.52))
+                wardrobe_rect.x = max(inner.left, min(inner.right - wardrobe_rect.w, wardrobe_rect.x))
+                wardrobe_rect.y = max(inner.top, min(inner.bottom - wardrobe_rect.h, wardrobe_rect.y))
+                sprite_items.append((wardrobe_rect, WARDROBE_SPRITE, "옷장"))
+            else:
+                items.append(item(0.78, 0.50, 0.18, 0.58, "옷장", 34, 70))
         elif room_id == "kitchen":
-            items = [item(0.28, 0.56, 0.24, 0.60, "조리대", 42, 80), item(0.72, 0.38, 0.24, 0.34, "싱크대", 42, 42)]
+            if KITCHEN_SINK_SPRITE:
+                kitchen_sink = KITCHEN_SINK_SPRITE
+                sink_rect = kitchen_sink.get_rect()
+                max_w = max(80, inner.w - 12)
+                if sink_rect.w > max_w:
+                    scale = max_w / sink_rect.w
+                    size = (round(sink_rect.w * scale), round(sink_rect.h * scale))
+                    kitchen_sink = pygame.transform.smoothscale(kitchen_sink, size)
+                    sink_rect = kitchen_sink.get_rect()
+                sink_rect.midtop = (r.centerx, r.top + 8)
+                sink_rect.x = max(inner.left, min(inner.right - sink_rect.w, sink_rect.x))
+                sink_rect.y = r.top + 8
+                sprite_items.append((sink_rect, kitchen_sink, "싱크대"))
+            else:
+                items = [item(0.50, 0.22, 0.82, 0.24, "싱크대", 80, 38)]
         elif room_id == "study":
-            items = [item(0.36, 0.58, 0.38, 0.48, "책상", 62, 58), item(0.74, 0.60, 0.20, 0.34, "의자", 32, 38)]
+            if DESK_SPRITE:
+                desk = DESK_SPRITE
+                desk_rect = desk.get_rect()
+                max_w = max(80, inner.w - 14)
+                if desk_rect.w > max_w:
+                    scale = max_w / desk_rect.w
+                    size = (round(desk_rect.w * scale), round(desk_rect.h * scale))
+                    desk = pygame.transform.smoothscale(desk, size)
+                    desk_rect = desk.get_rect()
+                desk_rect.center = (round(r.left + r.w * 0.52), round(r.top + r.h * 0.56))
+                desk_rect.x = max(inner.left, min(inner.right - desk_rect.w, desk_rect.x))
+                desk_rect.y = max(inner.top, min(inner.bottom - desk_rect.h, desk_rect.y))
+                sprite_items.append((desk_rect, desk, "책상"))
+            else:
+                items = [item(0.48, 0.58, 0.56, 0.48, "책상", 82, 58)]
         elif room_id in {"bath1", "bath2"}:
             room_devices = [device for device in self.devices if device.room_id == room_id]
             avoid_points = [device.pos for device in room_devices if device.dtype == "light"]
@@ -1684,9 +1843,32 @@ class Game:
         elif room_id == "utility":
             items = [item(0.35, 0.57, 0.28, 0.42, "세탁기", 40, 44), item(0.67, 0.57, 0.28, 0.42, "건조기", 40, 44)]
         elif room_id == "dress":
-            items = [item(0.35, 0.55, 0.28, 0.62, "옷장", 34, 56), item(0.67, 0.55, 0.28, 0.62, "옷장", 34, 56)]
+            if WARDROBE_SPRITE:
+                for cx in (0.35, 0.67):
+                    wardrobe_rect = WARDROBE_SPRITE.get_rect()
+                    wardrobe_rect.center = (round(r.left + r.w * cx), round(r.top + r.h * 0.56))
+                    wardrobe_rect.x = max(inner.left, min(inner.right - wardrobe_rect.w, wardrobe_rect.x))
+                    wardrobe_rect.y = max(inner.top, min(inner.bottom - wardrobe_rect.h, wardrobe_rect.y))
+                    sprite_items.append((wardrobe_rect, WARDROBE_SPRITE, "옷장"))
+            else:
+                items = [item(0.35, 0.55, 0.28, 0.62, "옷장", 34, 56), item(0.67, 0.55, 0.28, 0.62, "옷장", 34, 56)]
         elif room_id == "pantry":
-            items = [item(0.50, 0.56, 0.48, 0.55, "선반", 48, 54)]
+            if PANTRY_SHELF_SPRITE:
+                shelf = PANTRY_SHELF_SPRITE
+                shelf_rect = shelf.get_rect()
+                max_w = max(54, inner.w - 10)
+                max_h = max(54, inner.h - 10)
+                scale = min(1.0, max_w / shelf_rect.w, max_h / shelf_rect.h)
+                if scale < 1.0:
+                    size = (round(shelf_rect.w * scale), round(shelf_rect.h * scale))
+                    shelf = pygame.transform.smoothscale(shelf, size)
+                    shelf_rect = shelf.get_rect()
+                shelf_rect.center = (r.centerx, round(r.top + r.h * 0.54))
+                shelf_rect.x = max(inner.left, min(inner.right - shelf_rect.w, shelf_rect.x))
+                shelf_rect.y = max(inner.top, min(inner.bottom - shelf_rect.h, shelf_rect.y))
+                sprite_items.append((shelf_rect, shelf, "선반"))
+            else:
+                items = [item(0.50, 0.56, 0.48, 0.55, "선반", 48, 54)]
         return items, sprite_items
 
     def furniture_solid_rect(self, rect, label):
@@ -1695,10 +1877,8 @@ class Game:
             "침대": (24, 22),
             "탁자": (32, 20),
             "옷장": (10, 12),
-            "조리대": (10, 14),
             "싱크대": (10, 12),
             "책상": (12, 14),
-            "의자": (8, 8),
             "욕조": (24, 20),
             "변기": (18, 24),
             "세면대": (18, 12),
@@ -1708,7 +1888,7 @@ class Game:
         return rect.inflate(-shrink[0] * 2, -shrink[1] * 2)
 
     def build_furniture_collision_rects(self):
-        colliding_labels = {"소파", "침대", "탁자", "옷장", "조리대", "싱크대", "책상", "의자", "선반", "세탁기", "건조기", "욕조", "변기"}
+        colliding_labels = {"소파", "침대", "탁자", "옷장", "싱크대", "책상", "선반", "세탁기", "건조기", "욕조", "변기"}
         collisions = []
         for room_id, room in self.rooms.items():
             items, sprite_items = self.room_furniture_items(room_id, room)
@@ -1886,7 +2066,7 @@ class Game:
                             pygame.quit()
                             sys.exit()
                     elif event.key == pygame.K_e:
-                        self.pick_banana_or_open_door()
+                        self.pick_banana_or_toggle_door()
                     elif event.key == pygame.K_SPACE:
                         self.turn_off_nearby_device()
                     elif event.key == pygame.K_r:
@@ -1920,7 +2100,7 @@ async def main():
                     if event.key == pygame.K_r:
                         game.reset()
                 elif event.key == pygame.K_e:
-                    game.pick_banana_or_open_door()
+                    game.pick_banana_or_toggle_door()
                 elif event.key == pygame.K_SPACE:
                     game.turn_off_nearby_device()
                 elif event.key == pygame.K_r:
