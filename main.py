@@ -267,9 +267,6 @@ SOFA_SPRITES = load_separated_sprites("sofa.png", 96)
 SOFA_FRONT_SPRITE = SOFA_SPRITES[0] if len(SOFA_SPRITES) > 0 else None
 SOFA_SIDE_SPRITE = SOFA_SPRITES[1] if len(SOFA_SPRITES) > 1 else None
 COFFEE_TABLE_SPRITE = load_sprite("coffee_table.png", 52)
-LAMP_SPRITE = load_sprite("램프.png", 48)
-FRIDGE_SPRITE = load_sprite("냉장고.png", 68)
-AC_SPRITE = load_sprite("에어컨.png", 58)
 
 
 ROOM_ORDER = [
@@ -1295,25 +1292,6 @@ class Game:
         def add(dtype, room_id, x, y, wall_side=None):
             self.devices.append(Device(dtype, room_id, x, y, self.rooms[room_id].rect, wall_side))
 
-        def inside(rect, fx, fy, margin=36):
-            x = rect.left + rect.w * fx
-            y = rect.top + rect.h * fy
-            margin_x = min(margin, max(22, rect.w // 4))
-            margin_y = min(margin, max(22, rect.h // 4))
-            x = max(rect.left + margin_x, min(rect.right - margin_x, x))
-            y = max(rect.top + margin_y, min(rect.bottom - margin_y, y))
-            return round(x), round(y)
-
-        def wall_points(rect):
-            return [
-                inside(rect, 0.12, 0.50, 30),
-                inside(rect, 0.88, 0.50, 30),
-                inside(rect, 0.50, 0.14, 30),
-                inside(rect, 0.50, 0.86, 30),
-                inside(rect, 0.20, 0.25, 34),
-                inside(rect, 0.80, 0.75, 34),
-            ]
-
         def outlet_points(rect, count):
             inset = 18
             candidates = [
@@ -1420,7 +1398,6 @@ class Game:
 
         for room_id, room in self.rooms.items():
             r = room.rect
-            wp = wall_points(r)
             if room_id == "living":
                 outlets = outlet_points(r, 3)
                 add("light", room_id, *switch_point(r))
