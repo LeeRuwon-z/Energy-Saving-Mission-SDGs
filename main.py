@@ -52,8 +52,8 @@ COLORS = {
     "text": (246, 248, 238),
     "muted": (190, 204, 195),
     "wall": (20, 20, 19),
-    "floor_wood": (232, 214, 178),
-    "floor_wood_2": (222, 202, 164),
+    "floor_wood": (207, 158, 96),
+    "floor_wood_2": (184, 128, 73),
     "floor_tile": (218, 218, 210),
     "floor_tile_2": (203, 207, 205),
     "corridor": (226, 211, 176),
@@ -1511,13 +1511,33 @@ class Game:
             self.finished = True
 
     def draw_floor_tiles(self, rect, tiled):
-        tile = 38
-        base = COLORS["floor_tile"] if tiled else COLORS["floor_wood"]
-        alt = COLORS["floor_tile_2"] if tiled else COLORS["floor_wood_2"]
-        for y in range(rect.y, rect.bottom, tile):
-            for x in range(rect.x, rect.right, tile):
-                color = alt if ((x // tile + y // tile) % 2) else base
-                pygame.draw.rect(self.world, color, (x, y, min(tile, rect.right - x), min(tile, rect.bottom - y)))
+        if tiled:
+            tile = 38
+            for y in range(rect.y, rect.bottom, tile):
+                for x in range(rect.x, rect.right, tile):
+                    color = COLORS["floor_tile_2"] if ((x // tile + y // tile) % 2) else COLORS["floor_tile"]
+                    pygame.draw.rect(self.world, color, (x, y, min(tile, rect.right - x), min(tile, rect.bottom - y)))
+            return
+
+        plank_h = 34
+        plank_w = 154
+        pygame.draw.rect(self.world, COLORS["floor_wood"], rect)
+        for row, y in enumerate(range(rect.y, rect.bottom, plank_h)):
+            offset = -plank_w // 2 if row % 2 else 0
+            for x in range(rect.x + offset, rect.right, plank_w):
+                plank = pygame.Rect(x, y, plank_w, min(plank_h, rect.bottom - y)).clip(rect)
+                if plank.w <= 0 or plank.h <= 0:
+                    continue
+                tone = ((x // 19 + y // 23 + row * 7) % 5) - 2
+                color = (
+                    max(0, min(255, COLORS["floor_wood"][0] + tone * 7)),
+                    max(0, min(255, COLORS["floor_wood"][1] + tone * 5)),
+                    max(0, min(255, COLORS["floor_wood"][2] + tone * 4)),
+                )
+                pygame.draw.rect(self.world, color, plank)
+                pygame.draw.line(self.world, COLORS["floor_wood_2"], (plank.left, plank.bottom - 1), (plank.right, plank.bottom - 1), 1)
+                pygame.draw.line(self.world, (226, 180, 111), (plank.left + 8, plank.top + 7), (plank.right - 8, plank.top + 7), 1)
+                pygame.draw.line(self.world, (160, 105, 58), (plank.left, plank.top), (plank.left, plank.bottom), 1)
 
     def draw_house(self):
         bounds = pygame.Rect(260, 120, WORLD_WIDTH - 520, WORLD_HEIGHT - 240)
