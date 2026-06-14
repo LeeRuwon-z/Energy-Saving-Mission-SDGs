@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+
+# 가상환경
+.venv/
+venv/
+
+# 빌드 결과물
+build/
+dist/
+
+# exe 파일
+*.exe
+
+# PyInstaller
+*.spec
+
+# 임시 파일
+*.log
+
+# VS Code
+.vscode/
+
+# 압축파일
+*.zip
+
+# 복구/분석용 파일
+_remote_main.py
+_py_run.py
+
+main.exe_extracted/
+python312_embed/
+
+pyinstxtractor.py
+run_decompile_py312.py
+
+recovered_*
+setup_py312.ps1
+
+decompile_log.txt
+
+__remote_main.py

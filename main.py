@@ -15,7 +15,7 @@ pygame.display.set_caption("절약 대작전")
 WIDTH, HEIGHT = 1000, 680
 WORLD_WIDTH, WORLD_HEIGHT = 4300, 3400
 FPS = 60
-TOP_UI = 72
+TOP_UI = 90
 BOTTOM_UI = 34
 VIEW_CENTER = pygame.Vector2(WIDTH // 2, (TOP_UI + HEIGHT - BOTTOM_UI) // 2)
 
@@ -41,7 +41,7 @@ ROOM_SIZE_UNITS = {
     "balcony": 3,
 }
 
-screen = pygame.display.set_mode((1000, 680), pygame.SCALED)
+screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.SCALED | pygame.FULLSCREEN)
 clock = pygame.time.Clock()
 
 
@@ -180,12 +180,93 @@ def load_sprite(filename, height):
     return pygame.transform.smoothscale(image, size)
 
 
+def load_split_sprites(filename, height, count=2):
+    path = os.path.join(ASSET_DIR, filename)
+    try:
+        image = pygame.image.load(path).convert_alpha()
+    except (pygame.error, FileNotFoundError):
+        return []
+    image = crop_to_alpha(remove_edge_black_background(image), padding=0)
+    cell_w = image.get_width() // count
+    sprites = []
+    for index in range(count):
+        cell = image.subsurface(pygame.Rect(index * cell_w, 0, cell_w, image.get_height())).copy()
+        cell = crop_to_alpha(cell)
+        scale = height / cell.get_height()
+        size = (max(1, round(cell.get_width() * scale)), height)
+        sprites.append(pygame.transform.smoothscale(cell, size))
+    return sprites
+
+
+def load_separated_sprites(filename, height, count=2):
+    path = os.path.join(ASSET_DIR, filename)
+    try:
+        image = pygame.image.load(path).convert_alpha()
+    except (pygame.error, FileNotFoundError):
+        return []
+    image = crop_to_alpha(remove_edge_black_background(image), padding=0)
+    active_columns = []
+    for x in range(image.get_width()):
+        active_columns.append(any(image.get_at((x, y)).a > 8 for y in range(image.get_height())))
+
+    runs = []
+    start = None
+    for x, active in enumerate(active_columns):
+        if active and start is None:
+            start = x
+        elif not active and start is not None:
+            runs.append((start, x - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(active_columns) - 1))
+
+    if len(runs) < count:
+        return load_split_sprites(filename, height, count)
+
+    sprites = []
+    for start, end in runs[:count]:
+        cell = image.subsurface(pygame.Rect(start, 0, end - start + 1, image.get_height())).copy()
+        cell = crop_to_alpha(cell)
+        scale = height / cell.get_height()
+        size = (max(1, round(cell.get_width() * scale)), height)
+        sprites.append(pygame.transform.smoothscale(cell, size))
+    return sprites
+
+
+def load_cover_image(filename, size):
+    path = os.path.join(ASSET_DIR, filename)
+    try:
+        image = pygame.image.load(path).convert_alpha()
+    except (pygame.error, FileNotFoundError):
+        return None
+    scale = max(size[0] / image.get_width(), size[1] / image.get_height())
+    scaled_size = (max(1, round(image.get_width() * scale)), max(1, round(image.get_height() * scale)))
+    image = pygame.transform.smoothscale(image, scaled_size)
+    rect = image.get_rect(center=(size[0] // 2, size[1] // 2))
+    return image.subsurface(pygame.Rect(-rect.x, -rect.y, size[0], size[1])).copy()
+
+
+TITLE_BACKGROUND = load_cover_image("title_background.png", (WIDTH, HEIGHT))
+START_BUTTON_SPRITE = load_sprite("start_button.png", 78)
 BANANA_SPRITE = load_sprite("banana.png", 42)
 DEVICE_SPRITES = {
     "lamp": load_sprite("lamp.png", 58),
     "fridge": load_sprite("fridge.png", 82),
     "ac": load_sprite("ac.png", 45),
+    "outlet": load_sprite("outlet.png", 34),
+    "fan": load_sprite("fan.png", 58),
 }
+DEVICE_STATE_SPRITES = {
+    "light": load_split_sprites("switch.png", 42),
+    "sink": load_split_sprites("sink.png", 58),
+}
+TOILET_SPRITE = load_sprite("toilet.png", 74)
+BATHTUB_SPRITE = load_sprite("bathtub.png", 58)
+BED_SPRITE = load_sprite("bed.png", 104)
+SOFA_SPRITES = load_separated_sprites("sofa.png", 96)
+SOFA_FRONT_SPRITE = SOFA_SPRITES[0] if len(SOFA_SPRITES) > 0 else None
+SOFA_SIDE_SPRITE = SOFA_SPRITES[1] if len(SOFA_SPRITES) > 1 else None
+COFFEE_TABLE_SPRITE = load_sprite("coffee_table.png", 52)
 LAMP_SPRITE = load_sprite("램프.png", 48)
 FRIDGE_SPRITE = load_sprite("냉장고.png", 68)
 AC_SPRITE = load_sprite("에어컨.png", 58)
@@ -217,6 +298,7 @@ TILED_ROOMS = {"entry", "bath1", "bath2", "utility", "balcony"}
 SPECIAL_LIVING_ONLY = {"entry", "balcony"}
 GLOBAL_HOUSE_AREAS = []
 GLOBAL_COLLISION_WALLS = []
+GLOBAL_FURNITURE_COLLISIONS = []
 ACTIVE_DOORS = []
 
 
@@ -615,6 +697,7 @@ class Device:
         self.watts = data["watts"]
         self.w, self.h = data["size"]
         self.sprite = DEVICE_SPRITES.get(dtype)
+        self.state_sprites = DEVICE_STATE_SPRITES.get(dtype, [])
         if self.sprite and self.dtype == "ac":
             if wall_side == "left":
                 self.sprite = pygame.transform.rotate(self.sprite, 90)
@@ -622,8 +705,12 @@ class Device:
                 self.sprite = pygame.transform.rotate(self.sprite, -90)
             elif wall_side == "bottom":
                 self.sprite = pygame.transform.rotate(self.sprite, 180)
+        if self.sprite and self.dtype == "fan" and glow_rect and self.x < glow_rect.centerx:
+            self.sprite = pygame.transform.flip(self.sprite, True, False)
         if self.sprite:
             self.w, self.h = self.sprite.get_size()
+        elif self.state_sprites:
+            self.w, self.h = self.state_sprites[0].get_size()
         self.color_on = data["on"]
         self.color_off = data["off"]
         self.on = False
@@ -660,22 +747,30 @@ class Device:
             surface.blit(glow, (rect.x - 29, rect.y - 29))
 
         color = self.color_on if self.on else self.color_off
-        if not self.sprite:
+        if not self.sprite and not self.state_sprites:
             draw_3d_rect(surface, rect, color, height=7, radius=6)
         if self.dtype == "light":
-            plate = rect.inflate(-6, -7)
-            pygame.draw.rect(surface, (245, 245, 232), plate, border_radius=3)
-            pygame.draw.rect(surface, COLORS["black"], plate, 1, border_radius=3)
-            knob_y = plate.top + 8 if self.on else plate.bottom - 8
-            pygame.draw.rect(surface, COLORS["green"] if self.on else (115, 120, 116), (plate.centerx - 4, knob_y - 5, 8, 10), border_radius=2)
+            if self.state_sprites:
+                surface.blit(self.state_sprites[1 if self.on else 0], rect)
+            else:
+                plate = rect.inflate(-6, -7)
+                pygame.draw.rect(surface, (245, 245, 232), plate, border_radius=3)
+                pygame.draw.rect(surface, COLORS["black"], plate, 1, border_radius=3)
+                knob_y = plate.top + 8 if self.on else plate.bottom - 8
+                pygame.draw.rect(surface, COLORS["green"] if self.on else (115, 120, 116), (plate.centerx - 4, knob_y - 5, 8, 10), border_radius=2)
         elif self.dtype == "outlet":
-            pygame.draw.circle(surface, COLORS["black"], (rect.centerx - 5, rect.centery), 2)
-            pygame.draw.circle(surface, COLORS["black"], (rect.centerx + 5, rect.centery), 2)
+            if self.sprite:
+                surface.blit(self.sprite, rect)
+            else:
+                pygame.draw.circle(surface, COLORS["black"], (rect.centerx - 5, rect.centery), 2)
+                pygame.draw.circle(surface, COLORS["black"], (rect.centerx + 5, rect.centery), 2)
         elif self.dtype == "ac":
             if self.sprite:
                 surface.blit(self.sprite, rect)
             else:
                 pygame.draw.rect(surface, (238, 248, 255), rect.inflate(-12, -14), border_radius=3)
+            if self.on:
+                self.draw_ac_wind(surface, rect, t)
         elif self.dtype == "lamp":
             if self.sprite:
                 surface.blit(self.sprite, rect)
@@ -690,22 +785,69 @@ class Device:
                 if self.on:
                     pygame.draw.rect(surface, (230, 250, 255), rect.inflate(10, -10), 2, border_radius=5)
         elif self.dtype == "fan":
-            pygame.draw.circle(surface, (236, 246, 247), rect.center, 13, 2)
-            angle = t * 10 if self.on else self.pulse
-            for i in range(3):
-                a = angle + i * math.tau / 3
-                end = (rect.centerx + math.cos(a) * 12, rect.centery + math.sin(a) * 12)
-                pygame.draw.line(surface, COLORS["blue_dark"], rect.center, end, 3)
+            if self.sprite:
+                surface.blit(self.sprite, rect)
+                if self.on:
+                    room_centerx = self.glow_rect.centerx if self.glow_rect else self.x
+                    for i, dy in enumerate((-14, 0, 14)):
+                        offset = (t * 34 + i * 9) % 18
+                        start_x = rect.left - 10 if self.x < room_centerx else rect.right + 10
+                        direction = -1 if self.x < room_centerx else 1
+                        points = [
+                            (round(start_x + direction * (offset + step * 10)), round(rect.centery + dy + math.sin(t * 8 + step) * 3))
+                            for step in range(4)
+                        ]
+                        pygame.draw.lines(surface, COLORS["blue"], False, points, 2)
+            else:
+                pygame.draw.circle(surface, (236, 246, 247), rect.center, 13, 2)
+                angle = t * 10 if self.on else self.pulse
+                for i in range(3):
+                    a = angle + i * math.tau / 3
+                    end = (rect.centerx + math.cos(a) * 12, rect.centery + math.sin(a) * 12)
+                    pygame.draw.line(surface, COLORS["blue_dark"], rect.center, end, 3)
         elif self.dtype == "sink":
-            pygame.draw.ellipse(surface, (235, 246, 247), rect.inflate(-8, -10))
-            if self.on:
-                pygame.draw.line(surface, COLORS["blue"], (rect.centerx, rect.top + 8), (rect.centerx, rect.bottom + 12), 3)
+            if self.state_sprites:
+                surface.blit(self.state_sprites[1 if self.on else 0], rect)
+            else:
+                pygame.draw.ellipse(surface, (235, 246, 247), rect.inflate(-8, -10))
+                if self.on:
+                    pygame.draw.line(surface, COLORS["blue"], (rect.centerx, rect.top + 8), (rect.centerx, rect.bottom + 12), 3)
 
-        pygame.draw.circle(surface, COLORS["green"] if self.on else (105, 112, 110), (rect.right - 6, rect.y + 6), 4)
+        if not self.state_sprites or self.dtype in {"light", "sink"}:
+            pygame.draw.circle(surface, COLORS["green"] if self.on else (105, 112, 110), (rect.right - 6, rect.y + 6), 4)
         draw_text(surface, self.label, FONT_XS, COLORS["black"], (rect.centerx, rect.bottom + 13), center=True)
         if self.flash > 0:
             self.flash = max(0, self.flash - 0.05)
             pygame.draw.rect(surface, COLORS["warn"], rect.inflate(10, 10), 2, border_radius=6)
+
+    def draw_ac_wind(self, surface, rect, t):
+        color = (116, 202, 238)
+        phase = t * 7 + self.pulse
+        side = self.wall_side or "top"
+        if side in {"top", "bottom"}:
+            direction = 1 if side == "top" else -1
+            start_y = rect.bottom if direction > 0 else rect.top
+            for lane, offset in enumerate((-30, 0, 30)):
+                points = []
+                drift = (phase * 10 + lane * 9) % 18
+                for step in range(5):
+                    distance = 8 + step * 12 + drift
+                    x = rect.centerx + offset + math.sin(phase + step * 0.8 + lane) * 5
+                    y = start_y + direction * distance
+                    points.append((round(x), round(y)))
+                pygame.draw.lines(surface, color, False, points, 2)
+        else:
+            direction = 1 if side == "left" else -1
+            start_x = rect.right if direction > 0 else rect.left
+            for lane, offset in enumerate((-28, 0, 28)):
+                points = []
+                drift = (phase * 10 + lane * 9) % 18
+                for step in range(5):
+                    distance = 8 + step * 12 + drift
+                    x = start_x + direction * distance
+                    y = rect.centery + offset + math.sin(phase + step * 0.8 + lane) * 5
+                    points.append((round(x), round(y)))
+                pygame.draw.lines(surface, color, False, points, 2)
 
 
 class Character:
@@ -735,6 +877,8 @@ class Character:
             return False
         rect = pygame.Rect(round(x - 13), round(y - 6), 26, 20)
         if rect.collidelist(GLOBAL_COLLISION_WALLS) != -1:
+            return False
+        if rect.collidelist(GLOBAL_FURNITURE_COLLISIONS) != -1:
             return False
         if ignore_doors:
             return True
@@ -889,13 +1033,26 @@ class Son(Character):
         choices = [d for d in devices if not d.on]
         if not choices:
             return None
-        special = [d for d in choices if d.dtype in {"fridge", "sink"}]
-        if special and random.random() < 0.45:
-            return random.choice(special)
-        high_waste = [d for d in choices if d.dtype in {"ac", "outlet", "fan"}]
-        if high_waste and random.random() < 0.55:
-            return random.choice(high_waste)
-        return random.choice(choices)
+
+        def pick_reachable(pool, max_checks=10):
+            random.shuffle(pool)
+            reachable = []
+            for device in pool[:max_checks]:
+                if self.find_path(device.pos):
+                    reachable.append(device)
+                    if len(reachable) >= 4:
+                        break
+            return random.choice(reachable) if reachable else None
+
+        if random.random() < 0.45:
+            special = pick_reachable([d for d in choices if d.dtype in {"fridge", "sink"}])
+            if special:
+                return special
+        if random.random() < 0.55:
+            high_waste = pick_reachable([d for d in choices if d.dtype in {"ac", "outlet", "fan"}])
+            if high_waste:
+                return high_waste
+        return pick_reachable(choices, 14)
 
     def next_direction(self, fallback_delta):
         while self.path and self.pos.distance_to(self.path[0]) < 12:
@@ -909,9 +1066,10 @@ class Son(Character):
     def find_path(self, target_pos):
         step = 20
         start = self.nearest_nav_cell(self.pos, step)
-        goal = self.nearest_nav_cell(target_pos, step)
-        if start is None or goal is None:
+        goal_cells = self.nav_goal_cells(target_pos, step)
+        if start is None or not goal_cells:
             return []
+        goals = set(goal_cells)
 
         def passable(cell):
             return self.can_stand_at(cell[0] * step, cell[1] * step, ignore_doors=True)
@@ -919,29 +1077,47 @@ class Son(Character):
         frontier = [(0, start)]
         came_from = {start: None}
         cost_so_far = {start: 0}
+        reached_goal = None
         while frontier and len(came_from) < 12000:
             _, current = heapq.heappop(frontier)
-            if current == goal:
+            if current in goals:
+                reached_goal = current
                 break
-            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
                 nxt = (current[0] + dx, current[1] + dy)
                 if not passable(nxt):
                     continue
-                new_cost = cost_so_far[current] + 1
+                new_cost = cost_so_far[current] + (1.4 if dx and dy else 1)
                 if nxt not in cost_so_far or new_cost < cost_so_far[nxt]:
                     cost_so_far[nxt] = new_cost
-                    priority = new_cost + abs(goal[0] - nxt[0]) + abs(goal[1] - nxt[1])
+                    heuristic = min(abs(goal[0] - nxt[0]) + abs(goal[1] - nxt[1]) for goal in goal_cells[:12])
+                    priority = new_cost + heuristic
                     heapq.heappush(frontier, (priority, nxt))
                     came_from[nxt] = current
-        if goal not in came_from:
+        if reached_goal is None:
             return []
         cells = []
-        current = goal
+        current = reached_goal
         while current != start:
             cells.append(current)
             current = came_from[current]
         cells.reverse()
         return [pygame.Vector2(cell[0] * step, cell[1] * step) for cell in cells]
+
+    def nav_goal_cells(self, pos, step):
+        base = (round(pos.x / step), round(pos.y / step))
+        cells = []
+        for radius in range(11):
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    if max(abs(dx), abs(dy)) == radius:
+                        cell = (base[0] + dx, base[1] + dy)
+                        if self.can_stand_at(cell[0] * step, cell[1] * step, ignore_doors=True):
+                            cells.append(cell)
+            if len(cells) >= 10:
+                break
+        cells.sort(key=lambda c: (c[0] * step - pos.x) ** 2 + (c[1] * step - pos.y) ** 2)
+        return cells
 
     def nearest_nav_cell(self, pos, step):
         base = (round(pos.x / step), round(pos.y / step))
@@ -1062,8 +1238,8 @@ class Game:
         self.world = pygame.Surface((WORLD_WIDTH, WORLD_HEIGHT))
         self.generator = MapGenerator()
         self.show_title = True
-        self.start_button = pygame.Rect(0, 0, 240, 64)
-        self.start_button.center = (WIDTH // 2 - 110, HEIGHT // 2 + 118)
+        self.start_button = START_BUTTON_SPRITE.get_rect() if START_BUTTON_SPRITE else pygame.Rect(0, 0, 240, 64)
+        self.start_button.center = (WIDTH // 2, HEIGHT - 178)
         self.title_mom = Mom(WIDTH // 2 + 235, HEIGHT // 2 + 115)
         self.reset()
 
@@ -1072,7 +1248,7 @@ class Game:
         self.show_title = False
 
     def reset(self):
-        global GLOBAL_HOUSE_AREAS, GLOBAL_COLLISION_WALLS, ACTIVE_DOORS
+        global GLOBAL_HOUSE_AREAS, GLOBAL_COLLISION_WALLS, GLOBAL_FURNITURE_COLLISIONS, ACTIVE_DOORS
         layout = self.generator.build()
         self.rooms = layout["rooms"]
         self.edges = layout["edges"]
@@ -1084,10 +1260,14 @@ class Game:
 
         self.devices = []
         self.create_room_devices()
+        self.furniture_collision_rects = self.build_furniture_collision_rects()
+        GLOBAL_FURNITURE_COLLISIONS = self.furniture_collision_rects
         living = self.rooms["living"].rect
         bed = self.rooms[random.choice(["bed1", "bed2", "bed3"])].rect
-        self.mom = Mom(living.centerx, living.centery)
-        self.son = Son(bed.centerx, bed.centery)
+        mom_x, mom_y = self.find_free_point(living, living.center)
+        son_x, son_y = self.find_free_point(bed, bed.center)
+        self.mom = Mom(mom_x, mom_y)
+        self.son = Son(son_x, son_y)
         self.bananas = []
         self.particles = []
         self.saved_count = 0
@@ -1217,7 +1397,11 @@ class Game:
             return sorted(candidates, key=score, reverse=True)[0]
 
         def corner_point(rect, dtype, index=0):
-            width, height = Device.TYPES[dtype]["size"]
+            sprite = DEVICE_SPRITES.get(dtype)
+            if sprite:
+                width, height = sprite.get_size()
+            else:
+                width, height = Device.TYPES[dtype]["size"]
             mx, my = width // 2 + 20, height // 2 + 20
             candidates = [
                 (rect.left + mx, rect.top + my),
@@ -1275,7 +1459,7 @@ class Game:
             elif room_id == "dress":
                 add("light", room_id, *switch_point(r))
             elif room_id in {"bath1", "bath2"}:
-                add("sink", room_id, *wall_device_point(r, "sink", ("left", "right", "top", "bottom")))
+                add("sink", room_id, *wall_device_point(r, "sink", ("left", "top", "bottom")))
                 add("light", room_id, *switch_point(r))
             elif room_id in {"utility", "pantry"}:
                 add("light", room_id, *switch_point(r))
@@ -1393,42 +1577,186 @@ class Game:
         for room in self.rooms.values():
             draw_text(self.world, room.name, FONT_XS, COLORS["black"], room.rect.center, center=True)
 
+    def room_furniture_items(self, room_id, room):
+        r = room.rect
+        items = []
+        sprite_items = []
+        inner = r.inflate(-28, -28)
+
+        def item(cx, cy, fw, fh, label, min_w=34, min_h=28):
+            furniture_scale = 0.76
+            width = min(inner.w, max(round(min_w * 0.82), round(r.w * fw * furniture_scale)))
+            height = min(inner.h, max(round(min_h * 0.82), round(r.h * fh * furniture_scale)))
+            x = round(r.left + r.w * cx - width / 2)
+            y = round(r.top + r.h * cy - height / 2)
+            x = max(inner.left, min(inner.right - width, x))
+            y = max(inner.top, min(inner.bottom - height, y))
+            return pygame.Rect(x, y, width, height), label
+
+        if room_id == "living":
+            if SOFA_FRONT_SPRITE:
+                use_side_sofa = SOFA_SIDE_SPRITE and r.h > r.w * 1.08
+                sofa_sprite = SOFA_SIDE_SPRITE if use_side_sofa else SOFA_FRONT_SPRITE
+                sofa_rect = sofa_sprite.get_rect()
+                sofa_rect.center = (
+                    round(r.left + r.w * (0.34 if not use_side_sofa else 0.30)),
+                    round(r.top + r.h * (0.54 if not use_side_sofa else 0.48)),
+                )
+                sofa_rect.x = max(inner.left, min(inner.right - sofa_rect.w, sofa_rect.x))
+                sofa_rect.y = max(inner.top, min(inner.bottom - sofa_rect.h, sofa_rect.y))
+                sprite_items.append((sofa_rect, sofa_sprite, "소파"))
+                if COFFEE_TABLE_SPRITE:
+                    table_rect = COFFEE_TABLE_SPRITE.get_rect()
+                    if use_side_sofa:
+                        table_rect.center = (round(sofa_rect.right + table_rect.w * 0.78), sofa_rect.centery)
+                    else:
+                        table_rect.center = (sofa_rect.centerx, round(sofa_rect.bottom + table_rect.h * 0.62))
+                    table_rect.x = max(inner.left, min(inner.right - table_rect.w, table_rect.x))
+                    table_rect.y = max(inner.top, min(inner.bottom - table_rect.h, table_rect.y))
+                    sprite_items.append((table_rect, COFFEE_TABLE_SPRITE, "탁자"))
+                else:
+                    items = [item(0.54, 0.56, 0.24, 0.22, "탁자", 58, 38)]
+            else:
+                items = [item(0.28, 0.52, 0.24, 0.48, "소파", 62, 70), item(0.52, 0.54, 0.24, 0.22, "탁자", 58, 38)]
+        elif room_id in {"bed1", "bed2", "bed3", "master"}:
+            if BED_SPRITE:
+                bed_rect = BED_SPRITE.get_rect()
+                bed_rect.center = (round(r.left + r.w * 0.36), round(r.top + r.h * 0.54))
+                bed_rect.x = max(inner.left, min(inner.right - bed_rect.w, bed_rect.x))
+                bed_rect.y = max(inner.top, min(inner.bottom - bed_rect.h, bed_rect.y))
+                sprite_items.append((bed_rect, BED_SPRITE, "침대"))
+                items = [item(0.78, 0.50, 0.18, 0.58, "옷장", 34, 70)]
+            else:
+                items = [item(0.36, 0.50, 0.48, 0.42, "침대", 82, 58), item(0.78, 0.50, 0.18, 0.58, "옷장", 34, 70)]
+        elif room_id == "kitchen":
+            items = [item(0.28, 0.56, 0.24, 0.60, "조리대", 42, 80), item(0.72, 0.38, 0.24, 0.34, "싱크대", 42, 42)]
+        elif room_id == "study":
+            items = [item(0.36, 0.58, 0.38, 0.48, "책상", 62, 58), item(0.74, 0.60, 0.20, 0.34, "의자", 32, 38)]
+        elif room_id in {"bath1", "bath2"}:
+            room_devices = [device for device in self.devices if device.room_id == room_id]
+            avoid_points = [device.pos for device in room_devices if device.dtype == "light"]
+            avoid_rects = [device.rect.inflate(34, 34) for device in room_devices if device.dtype in {"light", "sink"}]
+            bath_inner = r.inflate(-16, -16)
+
+            def bathroom_rect(sprite, fallback_rect, label, candidates):
+                rects = []
+                base_rect = sprite.get_rect() if sprite else fallback_rect
+                for side, ratio in candidates:
+                    candidate = base_rect.copy()
+                    if side == "top":
+                        candidate.center = (round(r.left + r.w * ratio), r.top + candidate.h // 2 + 10)
+                    elif side == "bottom":
+                        candidate.center = (round(r.left + r.w * ratio), r.bottom - candidate.h // 2 - 10)
+                    elif side == "left":
+                        candidate.center = (r.left + candidate.w // 2 + 10, round(r.top + r.h * ratio))
+                    else:
+                        candidate.center = (r.right - candidate.w // 2 - 10, round(r.top + r.h * ratio))
+                    candidate.x = max(bath_inner.left, min(bath_inner.right - candidate.w, candidate.x))
+                    candidate.y = max(bath_inner.top, min(bath_inner.bottom - candidate.h, candidate.y))
+                    rects.append(candidate)
+
+                def score(candidate):
+                    center = pygame.Vector2(candidate.center)
+                    point_score = min((center.distance_to(point) for point in avoid_points), default=180)
+                    overlap_penalty = sum(220 for avoid in avoid_rects if candidate.colliderect(avoid))
+                    return point_score - overlap_penalty
+
+                return max(rects, key=score), label
+
+            if BATHTUB_SPRITE:
+                tub_rect, _ = bathroom_rect(
+                    BATHTUB_SPRITE,
+                    pygame.Rect(0, 0, max(58, r.w // 2), 42),
+                    "욕조",
+                    (("bottom", 0.34), ("bottom", 0.66), ("top", 0.34), ("top", 0.66)),
+                )
+                sprite_items.append((tub_rect, BATHTUB_SPRITE, "욕조"))
+                avoid_rects.append(tub_rect.inflate(28, 28))
+            else:
+                items = [item(0.36, 0.60, 0.48, 0.38, "욕조", 58, 42)]
+            if TOILET_SPRITE:
+                toilet_rect, _ = bathroom_rect(
+                    TOILET_SPRITE,
+                    pygame.Rect(0, 0, 34, 42),
+                    "변기",
+                    (("right", 0.32), ("right", 0.68), ("left", 0.32), ("left", 0.68)),
+                )
+                sprite_items.append((toilet_rect, TOILET_SPRITE, "변기"))
+            else:
+                items.append(item(0.76, 0.58, 0.24, 0.28, "변기", 34, 32))
+        elif room_id == "utility":
+            items = [item(0.35, 0.57, 0.28, 0.42, "세탁기", 40, 44), item(0.67, 0.57, 0.28, 0.42, "건조기", 40, 44)]
+        elif room_id == "dress":
+            items = [item(0.35, 0.55, 0.28, 0.62, "옷장", 34, 56), item(0.67, 0.55, 0.28, 0.62, "옷장", 34, 56)]
+        elif room_id == "pantry":
+            items = [item(0.50, 0.56, 0.48, 0.55, "선반", 48, 54)]
+        return items, sprite_items
+
+    def furniture_solid_rect(self, rect, label):
+        shrink = {
+            "소파": (30, 26),
+            "침대": (24, 22),
+            "탁자": (32, 20),
+            "옷장": (10, 12),
+            "조리대": (10, 14),
+            "싱크대": (10, 12),
+            "책상": (12, 14),
+            "의자": (8, 8),
+            "욕조": (24, 20),
+            "변기": (18, 24),
+            "세면대": (18, 12),
+        }.get(label, (12, 12))
+        if rect.w <= shrink[0] * 2 + 8 or rect.h <= shrink[1] * 2 + 8:
+            return rect.copy()
+        return rect.inflate(-shrink[0] * 2, -shrink[1] * 2)
+
+    def build_furniture_collision_rects(self):
+        colliding_labels = {"소파", "침대", "탁자", "옷장", "조리대", "싱크대", "책상", "의자", "선반", "세탁기", "건조기", "욕조", "변기"}
+        collisions = []
+        for room_id, room in self.rooms.items():
+            items, sprite_items = self.room_furniture_items(room_id, room)
+            for rect, label in items:
+                if label in colliding_labels:
+                    collisions.append(self.furniture_solid_rect(rect, label))
+            for rect, _, label in sprite_items:
+                solid_label = label or "소파"
+                if solid_label in colliding_labels:
+                    collisions.append(self.furniture_solid_rect(rect, solid_label))
+        for device in self.devices:
+            if device.dtype == "sink":
+                collisions.append(self.furniture_solid_rect(device.rect, "세면대"))
+        return collisions
+
+    def find_free_point(self, room_rect, preferred):
+        px, py = preferred
+        candidates = [(px, py)]
+        for radius in range(28, max(room_rect.w, room_rect.h), 28):
+            for dx, dy in ((radius, 0), (-radius, 0), (0, radius), (0, -radius), (radius, radius), (-radius, radius), (radius, -radius), (-radius, -radius)):
+                candidates.append((px + dx, py + dy))
+        inner = room_rect.inflate(-52, -52)
+        for x, y in candidates:
+            if not inner.collidepoint(x, y):
+                continue
+            rect = pygame.Rect(round(x - 13), round(y - 6), 26, 20)
+            if rect.collidelist(GLOBAL_COLLISION_WALLS) != -1:
+                continue
+            if rect.collidelist(GLOBAL_FURNITURE_COLLISIONS) != -1:
+                continue
+            return round(x), round(y)
+        return room_rect.center
+
     def draw_furniture(self):
         for room_id, room in self.rooms.items():
-            r = room.rect
-            items = []
-            inner = r.inflate(-28, -28)
-
-            def item(cx, cy, fw, fh, label, min_w=34, min_h=28):
-                furniture_scale = 0.76
-                width = min(inner.w, max(round(min_w * 0.82), round(r.w * fw * furniture_scale)))
-                height = min(inner.h, max(round(min_h * 0.82), round(r.h * fh * furniture_scale)))
-                x = round(r.left + r.w * cx - width / 2)
-                y = round(r.top + r.h * cy - height / 2)
-                x = max(inner.left, min(inner.right - width, x))
-                y = max(inner.top, min(inner.bottom - height, y))
-                return pygame.Rect(x, y, width, height), label
-
-            if room_id == "living":
-                items = [item(0.28, 0.52, 0.24, 0.48, "소파", 62, 70), item(0.52, 0.54, 0.24, 0.22, "탁자", 58, 38)]
-            elif room_id in {"bed1", "bed2", "bed3", "master"}:
-                items = [item(0.36, 0.50, 0.48, 0.42, "침대", 82, 58), item(0.78, 0.50, 0.18, 0.58, "옷장", 34, 70)]
-            elif room_id == "kitchen":
-                items = [item(0.28, 0.56, 0.24, 0.60, "조리대", 42, 80), item(0.72, 0.38, 0.24, 0.34, "싱크대", 42, 42)]
-            elif room_id == "study":
-                items = [item(0.36, 0.58, 0.38, 0.48, "책상", 62, 58), item(0.74, 0.60, 0.20, 0.34, "의자", 32, 38)]
-            elif room_id in {"bath1", "bath2"}:
-                items = [item(0.36, 0.60, 0.48, 0.38, "욕조", 58, 42), item(0.76, 0.58, 0.24, 0.28, "변기", 34, 32)]
-            elif room_id == "utility":
-                items = [item(0.35, 0.57, 0.28, 0.42, "세탁기", 40, 44), item(0.67, 0.57, 0.28, 0.42, "건조기", 40, 44)]
-            elif room_id == "dress":
-                items = [item(0.35, 0.55, 0.28, 0.62, "옷장", 34, 56), item(0.67, 0.55, 0.28, 0.62, "옷장", 34, 56)]
-            elif room_id == "pantry":
-                items = [item(0.50, 0.56, 0.48, 0.55, "선반", 48, 54)]
+            items, sprite_items = self.room_furniture_items(room_id, room)
             for rect, label in items:
                 draw_shadow(self.world, pygame.Rect(rect.x + 5, rect.y + rect.h - 2, rect.w, 15), 34)
                 draw_3d_rect(self.world, rect, COLORS["wood"] if label not in {"소파", "침대", "욕조"} else (210, 200, 183))
                 draw_text(self.world, label, FONT_XS, COLORS["black"], rect.center, center=True)
+            for rect, sprite, label in sprite_items:
+                draw_shadow(self.world, pygame.Rect(rect.x + 5, rect.y + rect.h - 2, rect.w, 15), 34)
+                self.world.blit(sprite, rect)
+                if label:
+                    draw_text(self.world, label, FONT_XS, COLORS["black"], (rect.centerx, rect.bottom + 12), center=True)
 
     def draw_world(self):
         self.world.fill(COLORS["outside"])
@@ -1454,15 +1782,7 @@ class Game:
         draw_text(screen, "이동: WASD/방향키   바나나/문: E   낭비 처리: SPACE   R: 다시 시작", FONT_SM, COLORS["muted"], (18, 47))
         secs = max(0, int(self.time_left))
         draw_text(screen, f"{secs:02d}", FONT_LG, COLORS["warn"] if secs < 15 else COLORS["text"], (930, 12))
-        bar = pygame.Rect(392, 17, 260, 18)
-        pygame.draw.rect(screen, (82, 89, 80), bar, border_radius=9)
-        fill = pygame.Rect(bar.x, bar.y, int(bar.w * self.risk / 100), bar.h)
-        color = COLORS["danger"] if self.risk > 72 else COLORS["warn"] if self.risk > 42 else COLORS["green"]
-        if fill.w:
-            pygame.draw.rect(screen, color, fill, border_radius=9)
-        pygame.draw.rect(screen, COLORS["text"], bar, 1, border_radius=9)
-        draw_text(screen, "낭비 위험도", FONT_XS, COLORS["muted"], (bar.x, bar.y - 15))
-        draw_text(screen, f"전등 {self.lights_off_count}개   처리 {self.saved_count}개   절약 {self.saved_watts}W", FONT_SM, COLORS["green"], (392, 42))
+        draw_text(screen, f"전등스위치 {self.lights_off_count}개   처리 {self.saved_count}개   절약 {self.saved_watts}W", FONT_SM, COLORS["green"], (18, 69))
         draw_text(screen, self.tips[self.tip_index], FONT_SM, COLORS["text"], (WIDTH // 2, HEIGHT - BOTTOM_UI // 2), center=True)
         self.draw_minimap()
 
@@ -1502,40 +1822,41 @@ class Game:
             draw_text(screen, line, FONT_MD, color, (panel.centerx, panel.y + 100 + i * 38), center=True)
 
     def draw_title(self):
-        screen.fill((220, 229, 215))
-        for y in range(0, HEIGHT, 40):
-            for x in range(0, WIDTH, 40):
-                color = (226, 236, 222) if (x // 40 + y // 40) % 2 else (213, 225, 211)
-                pygame.draw.rect(screen, color, (x, y, 40, 40))
-
-        pygame.draw.rect(screen, COLORS["ui"], (0, 0, WIDTH, 74))
-        draw_text(screen, "SDGs 13 기후 변화 대응", FONT_MD, COLORS["muted"], (WIDTH // 2, 38), center=True)
-
-        title_pos = (WIDTH // 2 - 165, HEIGHT // 2 - 95)
-        draw_text(screen, "절약 대작전", FONT_TITLE, COLORS["ui"], title_pos, center=True)
-        draw_text(screen, "집 안의 낭비를 찾아 전기와 물을 아껴요", FONT_MD, COLORS["ui_2"], (title_pos[0], title_pos[1] + 74), center=True)
-
-        if self.title_mom.sprite:
-            sprite = self.title_mom.sprite
-            sw, sh = sprite.get_size()
-            bust = sprite.subsurface(pygame.Rect(0, 0, sw, round(sh * 0.62))).copy()
-            bust_h = 245
-            bust_w = round(bust.get_width() * bust_h / bust.get_height())
-            big = pygame.transform.smoothscale(bust, (bust_w, bust_h))
-            draw_shadow(screen, pygame.Rect(WIDTH // 2 + 126, HEIGHT // 2 + 98, 185, 24), 70)
-            screen.blit(big, big.get_rect(midbottom=(WIDTH // 2 + 230, HEIGHT // 2 + 116)))
+        if TITLE_BACKGROUND:
+            screen.blit(TITLE_BACKGROUND, (0, 0))
         else:
-            draw_shadow(screen, pygame.Rect(WIDTH // 2 + 162, HEIGHT // 2 + 88, 135, 22), 70)
-            pygame.draw.circle(screen, self.title_mom.skin, (WIDTH // 2 + 230, HEIGHT // 2 - 20), 54)
-            pygame.draw.ellipse(screen, self.title_mom.clothes, (WIDTH // 2 + 174, HEIGHT // 2 + 32, 112, 95))
+            screen.fill((220, 229, 215))
 
         mouse_pos = pygame.mouse.get_pos()
         hover = self.start_button.collidepoint(mouse_pos)
-        button_color = COLORS["green"] if hover else COLORS["ui_2"]
-        button_dark = COLORS["green_dark"] if hover else COLORS["ui"]
-        draw_3d_rect(screen, self.start_button, button_color, button_dark, height=8, radius=10)
-        draw_text(screen, "시작하기", FONT_LG, COLORS["white"], self.start_button.center, center=True)
-        draw_text(screen, "Enter 또는 Space로도 시작할 수 있어요", FONT_SM, COLORS["ui_2"], (self.start_button.centerx, self.start_button.bottom + 32), center=True)
+        pressed = hover and pygame.mouse.get_pressed(num_buttons=3)[0]
+        if START_BUTTON_SPRITE:
+            button = START_BUTTON_SPRITE.copy()
+            if pressed:
+                button.fill((178, 205, 150, 255), special_flags=pygame.BLEND_RGBA_MULT)
+                scale = 0.98
+                y_offset = 6
+            elif hover:
+                button.fill((235, 255, 214, 255), special_flags=pygame.BLEND_RGBA_MULT)
+                scale = 1.08
+                y_offset = -3
+            else:
+                scale = 1.0
+                y_offset = 0
+            draw_w = round(button.get_width() * scale)
+            draw_h = round(button.get_height() * scale)
+            button = pygame.transform.smoothscale(button, (draw_w, draw_h))
+            draw_rect = button.get_rect(center=(self.start_button.centerx, self.start_button.centery + y_offset))
+            if hover and not pressed:
+                draw_shadow(screen, pygame.Rect(draw_rect.x + 12, draw_rect.y + draw_rect.h - 6, draw_rect.w - 24, 18), 60)
+            screen.blit(button, draw_rect)
+        else:
+            button_color = COLORS["green"] if hover else COLORS["ui_2"]
+            button_dark = COLORS["green_dark"] if hover else COLORS["ui"]
+            button_rect = self.start_button.move(0, 5 if pressed else 0)
+            draw_3d_rect(screen, button_rect, button_color, button_dark, height=4 if pressed else 8, radius=10)
+            draw_text(screen, "시작하기", FONT_LG, COLORS["white"], button_rect.center, center=True)
+        draw_text(screen, "Enter 또는 Space로도 시작할 수 있어요", FONT_SM, COLORS["ui"], (self.start_button.centerx, self.start_button.bottom + 32), center=True)
 
     def draw(self):
         if self.show_title:
@@ -1621,4 +1942,3 @@ async def main():
         await asyncio.sleep(0)
 
 asyncio.run(main())
-
